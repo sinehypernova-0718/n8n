@@ -707,6 +707,64 @@ describe('OpenAI Response Operation', () => {
 	});
 
 	describe('Edge Cases', () => {
+		it('should handle null response.output without crashing (simplify=true)', async () => {
+			mockExecuteFunctions.getNodeParameter.mockImplementation((param: string) => {
+				if (param === 'simplify') return true;
+				return 'default';
+			});
+
+			const mockResponse = {
+				id: 'resp_123',
+				status: 'completed',
+				output: null as unknown,
+			};
+
+			mockCreateRequest.mockResolvedValue({
+				model: 'gpt-4o',
+				input: [],
+			});
+			mockApiRequest.mockResolvedValue(mockResponse);
+			mockGetConnectedTools.mockResolvedValue([]);
+
+			const result = await execute.call(mockExecuteFunctions, 0);
+
+			expect(result).toEqual([
+				{
+					json: { output: [] },
+					pairedItem: { item: 0 },
+				},
+			]);
+		});
+
+		it('should handle undefined response.output without crashing (simplify=true)', async () => {
+			mockExecuteFunctions.getNodeParameter.mockImplementation((param: string) => {
+				if (param === 'simplify') return true;
+				return 'default';
+			});
+
+			const mockResponse = {
+				id: 'resp_123',
+				status: 'completed',
+				output: undefined,
+			};
+
+			mockCreateRequest.mockResolvedValue({
+				model: 'gpt-4o',
+				input: [],
+			});
+			mockApiRequest.mockResolvedValue(mockResponse);
+			mockGetConnectedTools.mockResolvedValue([]);
+
+			const result = await execute.call(mockExecuteFunctions, 0);
+
+			expect(result).toEqual([
+				{
+					json: { output: [] },
+					pairedItem: { item: 0 },
+				},
+			]);
+		});
+
 		it('should handle empty messages array', async () => {
 			mockExecuteFunctions.getNodeParameter.mockImplementation((param: string) => {
 				if (param === 'responses.values') return [];
