@@ -179,8 +179,15 @@ export class NodeCatalogService {
 			const nodeId = typeof id === 'string' ? id : id.nodeId;
 			const description = this.mcpRegistryDescriptions.get(nodeId);
 			if (description) {
-				const synthesized = synthesizeMcpRegistryTypeDef(description);
-				results.push(`## ${nodeId}\n\n\`\`\`typescript\n${synthesized}\n\`\`\``);
+				try {
+					const synthesized = synthesizeMcpRegistryTypeDef(description);
+					results.push(`## ${nodeId}\n\n\`\`\`typescript\n${synthesized}\n\`\`\``);
+				} catch (error) {
+					this.logger.warn(`Failed to synthesize type for ${nodeId}`, { error });
+					errors.push(
+						`Node type '${nodeId}' is installed but type definitions could not be generated. Use validate_node_config to validate parameters instead.`,
+					);
+				}
 			} else {
 				errors.push(
 					`Node type '${nodeId}' not found. Use search_node to find the correct node ID.`,
@@ -238,9 +245,12 @@ export class NodeCatalogService {
 	 * Resolve a single on-disk node id to either a markdown result or an error message.
 	 *
 	 * Tries the SDK's static type-definition file first; on miss, falls back to
-	 * synthesising a type from the in-memory node description. Errors from
-	 * synthesis are returned to the caller — this method never throws on a
-	 * missing or malformed node, it just reports the failure string.
+	 * synthesising a type from the in-memory node description. When the caller
+	 * pins a specific version, the static result is returned only if the SDK
+	 * succeeded; a version-level miss is surfaced as an error rather than
+	 * substituting a different version's type. Errors from synthesis are returned
+	 * to the caller — this method never throws on a missing or malformed node,
+	 * it just reports the failure string.
 	 */
 	private async resolveOnDiskNode(
 		id: NodeRequest,
@@ -253,12 +263,27 @@ export class NodeCatalogService {
 			nodeDefinitionDirs: this.nodeDefinitionDirs,
 		});
 
+		const requestedVersion = typeof id === 'string' ? undefined : id.version;
+
+		// The SDK returns "# Errors" for any failure (missing node, missing
+		// version, invalid ID, etc.). Detect via the section header rather than
+		// a specific error string so version-level misses don't leak through as
+		// fake success blocks.
 		// TODO: TECH DEBT – Replace string sniffing with a structured error result from
 		// `@n8n/ai-utilities` to avoid silent breakage if the error message format changes.
 		// Tests cover the current coupling.
-		if (!staticResult.includes(`Node type '${nodeId}' not found.`)) {
+		if (!staticResult.includes('# Errors')) {
 			const cleaned = staticResult.replace(/^# TypeScript Type Definitions\n\n/, '');
 			return { result: cleaned };
+		}
+
+		// Static lookup failed. Surface SDK errors that carry actionable info
+		// (e.g. "Version '...' not found", invalid ID, missing types dir) directly
+		// rather than masking them behind a synthesised type that may not match
+		// what the caller asked for.
+		const sdkErrorMessage = staticResult.match(/# Errors\n\n([\s\S]*)/)?.[1]?.trim();
+		if (sdkErrorMessage && sdkErrorMessage !== `Node type '${nodeId}' not found.`) {
+			return { error: sdkErrorMessage };
 		}
 
 		// Fallback to synthesis when the SDK has no static file for this node.
@@ -267,6 +292,19 @@ export class NodeCatalogService {
 			return {
 				error: `Node type '${nodeId}' not found. Use search_node to find the correct node ID.`,
 			};
+		}
+
+		// If the caller pinned a specific version, only synthesise when the
+		// in-memory description covers it. Otherwise we'd return a type for a
+		// different version than requested.
+		if (requestedVersion !== undefined) {
+			const availableVersions = this.getAvailableVersions(desc);
+			const requested = Number.parseInt(requestedVersion, 10);
+			if (Number.isNaN(requested) || !availableVersions.includes(requested)) {
+				return {
+					error: `Version '${requestedVersion}' not found for node '${nodeId}'. Available versions: ${availableVersions.join(', ')}.`,
+				};
+			}
 		}
 
 		try {
@@ -289,6 +327,15 @@ export class NodeCatalogService {
 				error: `Node type '${nodeId}' is installed but type definitions could not be generated. Use validate_node_config to validate parameters instead.`,
 			};
 		}
+	}
+
+	/**
+	 * Collect the version numbers advertised by an `INodeTypeDescription`,
+	 * honouring `defaultVersion` when `version` is a bare number.
+	 */
+	private getAvailableVersions(desc: INodeTypeDescription): number[] {
+		const raw = Array.isArray(desc.version) ? desc.version : [desc.version];
+		return raw.filter((v): v is number => typeof v === 'number');
 	}
 
 	private async doInitialize(): Promise<void> {
@@ -339,14 +386,15 @@ export class NodeCatalogService {
 		this.nodeDefinitionDirs = nextDirs;
 		this.indexMcpRegistryDescriptions(nodeTypeDescriptions);
 
-		const { setSchemaBaseDirs } = await import('@n8n/workflow-sdk');
-		setSchemaBaseDirs(this.nodeDefinitionDirs);
-
-		// Invalidate caches AFTER the swap so a concurrent reader can't repopulate
-		// them with stale results between the swap and the clear.
+		// Invalidate caches immediately after the swap, before any await, so a
+		// concurrent reader can't repopulate them with stale results against
+		// the new snapshot.
 		this.searchStates.clear();
 		this.getCache.clear();
 		this.suggestCache.clear();
+
+		const { setSchemaBaseDirs } = await import('@n8n/workflow-sdk');
+		setSchemaBaseDirs(this.nodeDefinitionDirs);
 
 		this.logger.debug('NodeCatalogService refreshed node types', {
 			nodeTypeCount: nodeTypeDescriptions.length,

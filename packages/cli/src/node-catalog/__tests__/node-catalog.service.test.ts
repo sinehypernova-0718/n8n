@@ -341,6 +341,70 @@ describe('NodeCatalogService', () => {
 			expect(result).toContain("Node type 'n8n-nodes-resend.resend' not found. Use search_node");
 		});
 
+		test('surfaces SDK version-miss error instead of returning it as a result', async () => {
+			// SDK has a static file for v2 but not for v3. Without the fix the
+			// response would be treated as a successful result and the SDK's
+			// error string would leak into the type-definitions block.
+			mockGetNodeTypes.mockReturnValueOnce(
+				"\n\n# Errors\n\nVersion '3' not found for node 'n8n-nodes-resend.resend'.",
+			);
+			loadNodesAndCredentials.collectTypes.mockResolvedValueOnce({
+				nodes: [{ name: 'resend', properties: [] }],
+			} as any);
+
+			await service.initialize();
+			const result = await service.getNodeTypes([
+				{ nodeId: 'n8n-nodes-resend.resend', version: '3' },
+			]);
+
+			expect(result).toContain('# Errors');
+			expect(result).toContain("Version '3' not found for node 'n8n-nodes-resend.resend'");
+			// Must not leak the SDK error into the success block.
+			expect(result).not.toContain('# TypeScript Type Definitions');
+			expect(mockGenerateNodeTypeFile).not.toHaveBeenCalled();
+		});
+
+		test('errors on version miss when synthesis would otherwise substitute a different version', async () => {
+			// SDK has no static file at all → would normally synthesise from the
+			// in-memory description. But the description advertises versions 1+2
+			// and the caller asked for 3, so synthesising v2's type silently
+			// would be wrong.
+			mockGetNodeTypes.mockReturnValueOnce(
+				"\n\n# Errors\n\nNode type 'n8n-nodes-resend.resend' not found.",
+			);
+			loadNodesAndCredentials.collectTypes.mockResolvedValueOnce({
+				nodes: [{ name: 'resend', version: [1, 2], properties: [] }],
+			} as any);
+
+			await service.initialize();
+			const result = await service.getNodeTypes([
+				{ nodeId: 'n8n-nodes-resend.resend', version: '3' },
+			]);
+
+			expect(result).toContain('# Errors');
+			expect(result).toContain("Version '3' not found for node 'n8n-nodes-resend.resend'");
+			expect(result).toContain('Available versions: 1, 2');
+			expect(mockGenerateNodeTypeFile).not.toHaveBeenCalled();
+		});
+
+		test('synthesises when the requested version is covered by the description', async () => {
+			mockGetNodeTypes.mockReturnValueOnce(
+				"\n\n# Errors\n\nNode type 'n8n-nodes-resend.resend' not found.",
+			);
+			loadNodesAndCredentials.collectTypes.mockResolvedValueOnce({
+				nodes: [{ name: 'resend', version: [1, 2], properties: [] }],
+			} as any);
+
+			await service.initialize();
+			const result = await service.getNodeTypes([
+				{ nodeId: 'n8n-nodes-resend.resend', version: '2' },
+			]);
+
+			expect(result).toContain('# TypeScript Type Definitions');
+			expect(result).toContain('// Synthesized type for n8n-nodes-resend.resend');
+			expect(mockGenerateNodeTypeFile).toHaveBeenCalledTimes(1);
+		});
+
 		test('returns empty string when called with no nodeIds', async () => {
 			await service.initialize();
 			const result = await service.getNodeTypes([]);
@@ -461,6 +525,10 @@ describe('NodeCatalogService', () => {
 			} as any);
 
 			await service.initialize();
+			// set has a static type file in this scenario.
+			mockGetNodeTypes.mockReturnValueOnce(
+				'# TypeScript Type Definitions\n\n## n8n-nodes-base.set\n\nset-content',
+			);
 			const initialResult = await service.getNodeTypes(['n8n-nodes-base.set']);
 			expect(initialResult).toContain('# TypeScript Type Definitions');
 
