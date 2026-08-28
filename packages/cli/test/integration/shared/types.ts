@@ -70,7 +70,9 @@ type ModuleName =
 	| 'ldap'
 	| 'redaction'
 	| 'source-control'
+	| 'git-connections'
 	| 'token-exchange'
+	| 'policy-infrastructure'
 	| 'workflow-reviews';
 
 export interface SetupProps {
